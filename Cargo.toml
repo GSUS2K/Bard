@@ -1,0 +1,42 @@
+[package]
+name = "spoticord"
+version = "2.2.6"
+edition = "2021"
+rust-version = "1.83.0"
+
+[[bin]]
+name = "spoticord"
+path = "src/main.rs"
+
+[workspace]
+members = [
+    "spoticord_config",
+    "spoticord_database",
+    "spoticord_utils",
+]
+
+[dependencies]
+spoticord_config = { path = "./spoticord_config" }
+spoticord_database = { path = "./spoticord_database" }
+spoticord_utils = { path = "./spoticord_utils" }
+
+anyhow = "1.0.93"
+dotenvy = "0.15.7"
+env_logger = "0.11.5"
+log = "0.4.22"
+poise = "0.6.1"
+serenity = "0.12.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+songbird = "0.6.1"
+symphonia = { version = "0.5", features = ["aac", "flac", "isomp4", "mp3", "ogg", "vorbis", "wav"] }
+tokio = { version = "1.41.1", features = ["full"] }
+rustls = { version = "0.23.16", features = ["aws-lc-rs"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+
+[workspace.package]
+version = "2.2.6"

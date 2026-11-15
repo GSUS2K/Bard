@@ -1,0 +1,17 @@
+[Unit]
+Description=Bard Discord bot
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bard
+WorkingDirectory=/opt/bard
+EnvironmentFile=/etc/bard.env
+Environment=PATH=/home/bard/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+ExecStart=/opt/bard/target/release/spoticord
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
