@@ -343,7 +343,7 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
         .await?;
     let message_id = panel.message().await?.id;
 
-    while let Some(interaction) = ComponentInteractionCollector::new(ctx)
+    while let Some(interaction) = ComponentInteractionCollector::new(ctx.serenity_context())
         .author_id(ctx.author().id)
         .channel_id(ctx.channel_id())
         .guild_id(guild_id)
