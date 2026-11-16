@@ -4212,6 +4212,7 @@ dependencies = [
  "reqwest 0.12.9",
  "rustls 0.23.16",
  "serde_json",
+ "sha2",
  "serenity",
  "songbird",
  "spoticord_config",
