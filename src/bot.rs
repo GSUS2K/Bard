@@ -30,6 +30,8 @@ pub fn framework_opts() -> FrameworkOptions<Data, anyhow::Error> {
             commands::music::uploadfile(),
             commands::music::playfile(),
             commands::music::listfiles(),
+            commands::music::deletefile(),
+            commands::music::voicepanel(),
             commands::music::stopvoice(),
             commands::music::leavevoice(),
         ],
