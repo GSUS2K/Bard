@@ -5,7 +5,13 @@ use std::{
 
 use anyhow::{bail, Context as _, Result};
 use poise::CreateReply;
-use serenity::all::{Attachment, CreateEmbed, CreateEmbedFooter};
+use serenity::all::{
+    Attachment, ButtonStyle, ComponentInteractionCollector, ComponentInteractionDataKind,
+    CreateActionRow, CreateButton, CreateEmbed, CreateEmbedFooter, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateSelectMenu, CreateSelectMenuKind,
+    CreateSelectMenuOption, Permissions,
+};
+use sha2::{Digest, Sha256};
 use songbird::input::{codecs::get_codec_registry, codecs::get_probe, File as AudioFile, Input};
 use spoticord_utils::discord::Colors;
 use tokio::io::AsyncWriteExt;
@@ -74,6 +80,21 @@ pub async fn uploadfile(
         return reply(ctx, format!("I couldn't finish saving that file: {error}")).await;
     }
 
+    let owners_dir = root.join(".bard-owners");
+    if let Err(error) = tokio::fs::create_dir_all(&owners_dir).await {
+        let _ = tokio::fs::remove_file(&path).await;
+        return reply(ctx, format!("I couldn't save file ownership data: {error}")).await;
+    }
+    if let Err(error) = tokio::fs::write(
+        owner_metadata_path(&root, &filename),
+        ctx.author().id.get().to_string(),
+    )
+    .await
+    {
+        let _ = tokio::fs::remove_file(&path).await;
+        return reply(ctx, format!("I couldn't save file ownership data: {error}")).await;
+    }
+
     reply(
         ctx,
         format!(
@@ -135,7 +156,8 @@ pub async fn playfile(
 
     let mut call = call.lock().await;
     call.stop();
-    call.play_input(input);
+    call.queue().stop();
+    call.enqueue_input(input).await;
     drop(call);
 
     ctx.send(
@@ -191,6 +213,56 @@ pub async fn listfiles(ctx: Context<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Delete an uploaded audio file. Uploaders can delete their own files; server managers can delete any file.
+#[poise::command(slash_command, guild_only)]
+pub async fn deletefile(
+    ctx: Context<'_>,
+    #[autocomplete = "autocomplete_audio_file"]
+    #[description = "Audio file to delete"]
+    name: String,
+) -> Result<()> {
+    let path = match resolve_file(&name) {
+        Ok(path) => path,
+        Err(error) => return reply(ctx, error.to_string()).await,
+    };
+    let root = music_root()?;
+    let metadata = owner_metadata_path(&root, &name);
+    let uploader = tokio::fs::read_to_string(&metadata)
+        .await
+        .ok()
+        .and_then(|id| id.trim().parse::<u64>().ok());
+    let is_uploader = uploader == Some(ctx.author().id.get());
+    let is_bot_owner = ctx.author().id.get() == 682_288_992_456_409_096;
+    let is_server_manager = ctx.author_member().await.is_some_and(|member| {
+        member
+            .permissions(ctx.serenity_context().cache.as_ref())
+            .is_ok_and(|permissions| {
+                permissions.contains(Permissions::ADMINISTRATOR)
+                    || permissions.contains(Permissions::MANAGE_GUILD)
+            })
+    });
+
+    if !is_uploader && !is_server_manager && !is_bot_owner {
+        return reply(
+            ctx,
+            "You can delete files you uploaded. A server manager can delete anyone's files.",
+        )
+        .await;
+    }
+
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => {
+            let _ = tokio::fs::remove_file(metadata).await;
+            reply(
+                ctx,
+                format!("Deleted `{}`.", spoticord_utils::discord::escape(name)),
+            )
+            .await
+        }
+        Err(error) => reply(ctx, format!("I couldn't delete that file: {error}")).await,
+    }
+}
+
 /// Stop local audio playing in this server's voice channel
 #[poise::command(slash_command, guild_only)]
 pub async fn stopvoice(ctx: Context<'_>) -> Result<()> {
@@ -202,7 +274,9 @@ pub async fn stopvoice(ctx: Context<'_>) -> Result<()> {
         return reply(ctx, "The bot isn't connected to voice in this server.").await;
     };
 
-    call.lock().await.stop();
+    let mut call = call.lock().await;
+    call.stop();
+    call.queue().stop();
     reply(ctx, "Stopped local audio playback.").await
 }
 
@@ -218,6 +292,98 @@ pub async fn leavevoice(ctx: Context<'_>) -> Result<()> {
         Ok(()) => reply(ctx, "Left the voice channel.").await,
         Err(error) => reply(ctx, format!("I couldn't leave the voice channel: {error}")).await,
     }
+}
+
+/// Open an interactive control panel for local voice playback
+#[poise::command(slash_command, guild_only)]
+pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
+    let guild_id = ctx.guild_id().expect("guild_only command has a guild");
+    let files = music_root()
+        .ok()
+        .and_then(|root| audio_files(&root).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| name.chars().count() <= 100)
+        .take(25)
+        .collect::<Vec<_>>();
+
+    let mut components = Vec::new();
+    if !files.is_empty() {
+        let options = files
+            .iter()
+            .map(|name| CreateSelectMenuOption::new(name.clone(), name.clone()))
+            .collect();
+        components.push(CreateActionRow::SelectMenu(
+            CreateSelectMenu::new("bard:select-file", CreateSelectMenuKind::String { options })
+                .placeholder("Choose a local audio file"),
+        ));
+    }
+    components.push(CreateActionRow::Buttons(vec![
+        CreateButton::new("bard:pause")
+            .label("Pause")
+            .style(ButtonStyle::Secondary),
+        CreateButton::new("bard:resume")
+            .label("Resume")
+            .style(ButtonStyle::Primary),
+        CreateButton::new("bard:stop")
+            .label("Stop")
+            .style(ButtonStyle::Danger),
+        CreateButton::new("bard:leave")
+            .label("Disconnect")
+            .style(ButtonStyle::Secondary),
+    ]));
+
+    let panel = ctx
+        .send(
+            CreateReply::default()
+                .content("**Bard local player**\nChoose a file or use the playback controls.")
+                .components(components)
+                .ephemeral(true),
+        )
+        .await?;
+    let message_id = panel.message().await?.id;
+
+    while let Some(interaction) = ComponentInteractionCollector::new(ctx)
+        .author_id(ctx.author().id)
+        .channel_id(ctx.channel_id())
+        .guild_id(guild_id)
+        .message_id(message_id)
+        .timeout(std::time::Duration::from_secs(300))
+        .await
+    {
+        let result = match interaction.data.custom_id.as_str() {
+            "bard:pause" | "bard:resume" | "bard:stop" | "bard:leave" => {
+                voice_action(ctx, guild_id, interaction.data.custom_id.as_str()).await
+            }
+            "bard:select-file" => {
+                let selected = match &interaction.data.kind {
+                    ComponentInteractionDataKind::StringSelect { values } => values.first(),
+                    _ => None,
+                };
+                match selected {
+                    Some(name) => play_for_user(ctx, guild_id, ctx.author().id, name).await,
+                    None => bail!("Choose a file from the menu."),
+                }
+            }
+            _ => continue,
+        };
+        let message = match result {
+            Ok(message) => message,
+            Err(error) => error.to_string(),
+        };
+        interaction
+            .create_response(
+                ctx.serenity_context(),
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content(message)
+                        .ephemeral(true),
+                ),
+            )
+            .await?;
+    }
+
+    Ok(())
 }
 
 fn music_root() -> Result<PathBuf> {
@@ -297,6 +463,84 @@ async fn autocomplete_audio_file(_ctx: Context<'_>, partial: &str) -> Vec<String
     });
     files.truncate(25);
     files
+}
+
+fn owner_metadata_path(root: &Path, filename: &str) -> PathBuf {
+    let digest = Sha256::digest(filename.as_bytes());
+    let key = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    root.join(".bard-owners").join(format!("{key}.owner"))
+}
+
+async fn voice_action(
+    ctx: Context<'_>,
+    guild_id: serenity::all::GuildId,
+    action: &str,
+) -> Result<String> {
+    let manager = songbird::get(ctx.serenity_context())
+        .await
+        .context("The voice player is unavailable right now.")?;
+
+    if action == "leave" {
+        manager.leave(guild_id).await?;
+        return Ok("Disconnected from voice.".to_owned());
+    }
+
+    let call = manager
+        .get(guild_id)
+        .context("Bard isn't connected to voice in this server.")?;
+    let mut call = call.lock().await;
+    match action {
+        "pause" => {
+            call.queue().pause()?;
+            Ok("Paused local playback.".to_owned())
+        }
+        "resume" => {
+            call.queue().resume()?;
+            Ok("Resumed local playback.".to_owned())
+        }
+        "stop" => {
+            call.stop();
+            call.queue().stop();
+            Ok("Stopped local playback.".to_owned())
+        }
+        _ => bail!("Unknown playback control."),
+    }
+}
+
+async fn play_for_user(
+    ctx: Context<'_>,
+    guild_id: serenity::all::GuildId,
+    user_id: serenity::all::UserId,
+    name: &str,
+) -> Result<String> {
+    let path = resolve_file(name)?;
+    let channel_id = guild_id
+        .to_guild_cached(ctx.serenity_context())
+        .and_then(|guild| {
+            guild
+                .voice_states
+                .get(&user_id)
+                .and_then(|state| state.channel_id)
+        })
+        .context("Join a voice channel first, then choose a file.")?;
+    let input = Input::from(AudioFile::new(path))
+        .make_playable_async(get_codec_registry(), get_probe())
+        .await?;
+    let manager = songbird::get(ctx.serenity_context())
+        .await
+        .context("The voice player is unavailable right now.")?;
+    let call = manager.join(guild_id, channel_id).await?;
+    let mut call = call.lock().await;
+    call.stop();
+    call.queue().stop();
+    call.enqueue_input(input).await;
+    Ok(format!(
+        "Playing `{}`.",
+        spoticord_utils::discord::escape(name)
+    ))
 }
 
 fn resolve_file(name: &str) -> Result<PathBuf> {
