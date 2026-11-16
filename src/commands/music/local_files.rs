@@ -20,21 +20,13 @@ const MAX_UPLOAD_BYTES: u32 = 25 * 1024 * 1024;
 pub async fn uploadfile(
     ctx: Context<'_>,
     #[description = "Audio file to save"] file: Attachment,
+    #[description = "Optional saved name; the original extension is added if omitted"]
+    save_as: Option<String>,
 ) -> Result<()> {
-    let filename = &file.filename;
-    if filename.contains('/')
-        || filename.contains('\\')
-        || Path::new(filename).components().count() != 1
-    {
-        return reply(ctx, "Use a plain file name without folders.").await;
-    }
-    if !supported_audio(Path::new(filename)) {
-        return reply(
-            ctx,
-            "Supported file types are AAC, FLAC, M4A, MP3, OGG, and WAV.",
-        )
-        .await;
-    }
+    let filename = match upload_filename(&file.filename, save_as.as_deref()) {
+        Ok(filename) => filename,
+        Err(error) => return reply(ctx, error.to_string()).await,
+    };
     if file.size > MAX_UPLOAD_BYTES {
         return reply(ctx, "That file is over the 25 MB upload limit.").await;
     }
@@ -49,7 +41,7 @@ pub async fn uploadfile(
             return reply(ctx, format!("I couldn't open the music folder: {error}")).await
         }
     };
-    let path = root.join(filename);
+    let path = root.join(&filename);
     if path.exists() {
         return reply(
             ctx,
@@ -86,7 +78,7 @@ pub async fn uploadfile(
         ctx,
         format!(
             "Saved `{}` to the bot's music folder. Use `/playfile` to play it in voice.",
-            spoticord_utils::discord::escape(filename.clone())
+            spoticord_utils::discord::escape(filename)
         ),
     )
     .await
@@ -96,7 +88,9 @@ pub async fn uploadfile(
 #[poise::command(slash_command, guild_only)]
 pub async fn playfile(
     ctx: Context<'_>,
-    #[description = "File name from the music folder"] name: String,
+    #[autocomplete = "autocomplete_audio_file"]
+    #[description = "File name from the music folder"]
+    name: String,
 ) -> Result<()> {
     let path = match resolve_file(&name) {
         Ok(path) => path,
@@ -168,8 +162,8 @@ pub async fn listfiles(ctx: Context<'_>) -> Result<()> {
         Ok(root) => root,
         Err(error) => return reply(ctx, error.to_string()).await,
     };
-    let entries = match fs::read_dir(&root) {
-        Ok(entries) => entries,
+    let files = match audio_files(&root) {
+        Ok(files) => files,
         Err(error) => {
             return reply(
                 ctx,
@@ -181,22 +175,6 @@ pub async fn listfiles(ctx: Context<'_>) -> Result<()> {
             .await;
         }
     };
-    let mut files = entries
-        .filter_map(std::result::Result::ok)
-        .filter_map(std::result::Result::ok)
-        .filter(|entry| {
-            entry
-                .file_type()
-                .map(|kind| kind.is_file())
-                .unwrap_or(false)
-        })
-        .filter_map(|entry| {
-            let path = entry.path();
-            supported_audio(&path).then(|| entry.file_name().to_string_lossy().into_owned())
-        })
-        .collect::<Vec<_>>();
-    files.sort_unstable_by_key(|name| name.to_lowercase());
-
     let message = if files.is_empty() {
         format!("No supported audio files found in `{}`.", root.display())
     } else {
@@ -253,6 +231,74 @@ fn music_root() -> Result<PathBuf> {
         })
 }
 
+fn upload_filename(original: &str, requested: Option<&str>) -> Result<String> {
+    let Some(requested) = requested.map(str::trim).filter(|name| !name.is_empty()) else {
+        if supported_audio(Path::new(original)) {
+            return Ok(original.to_owned());
+        }
+        bail!("Supported file types are AAC, FLAC, M4A, MP3, OGG, and WAV.");
+    };
+
+    if requested.contains('/') || requested.contains('\\') {
+        bail!("Use a plain file name without folders.");
+    }
+
+    let mut filename = requested.to_owned();
+    if Path::new(&filename).extension().is_none() {
+        if let Some(extension) = Path::new(original).extension().and_then(|ext| ext.to_str()) {
+            filename.push('.');
+            filename.push_str(extension);
+        }
+    }
+
+    let path = Path::new(&filename);
+    if path.components().count() != 1
+        || !matches!(path.components().next(), Some(Component::Normal(_)))
+    {
+        bail!("Use a plain file name without folders.");
+    }
+    if !supported_audio(path) {
+        bail!("Use an AAC, FLAC, M4A, MP3, OGG, or WAV file name.");
+    }
+
+    Ok(filename)
+}
+
+fn audio_files(root: &Path) -> std::io::Result<Vec<String>> {
+    let entries = fs::read_dir(root)?;
+    let mut files = entries
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+        })
+        .filter_map(|entry| {
+            let path = entry.path();
+            supported_audio(&path).then(|| entry.file_name().to_string_lossy().into_owned())
+        })
+        .collect::<Vec<_>>();
+    files.sort_unstable_by_key(|name| name.to_lowercase());
+    Ok(files)
+}
+
+async fn autocomplete_audio_file(_ctx: Context<'_>, partial: &str) -> Vec<String> {
+    let query = partial.trim().to_lowercase();
+    let root = PathBuf::from(spoticord_config::music_dir());
+    let mut files = audio_files(&root)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| name.chars().count() <= 100 && name.to_lowercase().contains(&query))
+        .collect::<Vec<_>>();
+    files.sort_unstable_by_key(|name| {
+        let lower = name.to_lowercase();
+        (!lower.starts_with(&query), lower)
+    });
+    files.truncate(25);
+    files
+}
+
 fn resolve_file(name: &str) -> Result<PathBuf> {
     let requested = Path::new(name);
     if requested.components().count() != 1
@@ -295,3 +341,4 @@ async fn reply(ctx: Context<'_>, message: impl Into<String>) -> Result<()> {
     .await?;
     Ok(())
 }
+
