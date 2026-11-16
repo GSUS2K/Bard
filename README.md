@@ -12,8 +12,8 @@ The bot is based on archived Spoticord source and its code is licensed under AGP
 - `/playlists` — show your Spotify playlists with links.
 - `/unlink` — remove your Spotify account from Bard.
 - `/listfiles` — list local audio files available to the voice player.
-- `/uploadfile` — save an attached audio file from Discord into the bot's music folder (up to 25 MB).
-- `/playfile` — play a local audio file in your current voice channel.
+- `/uploadfile` — save an attached audio file from Discord into the bot's music folder (up to 25 MB); optionally provide `save_as` to rename it while uploading (the original extension is added if omitted).
+- `/playfile` — choose a local audio file from autocomplete, or type its exact name, to play it in your current voice channel.
 - `/stopvoice` and `/leavevoice` — stop local audio or disconnect the voice player.
 - `/admin status`, `/admin restart`, and `/admin update` — owner-only status, restart, and fast-forward update from your configured Git remote.
 
