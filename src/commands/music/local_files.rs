@@ -421,6 +421,7 @@ pub async fn stopvoice(ctx: Context<'_>) -> Result<()> {
     let mut call = call.lock().await;
     call.stop();
     call.queue().stop();
+    local_queues().lock().await.remove(&guild_id.get());
     reply(ctx, "Stopped local audio playback.").await
 }
 
@@ -433,7 +434,10 @@ pub async fn leavevoice(ctx: Context<'_>) -> Result<()> {
     };
 
     match songbird.leave(guild_id).await {
-        Ok(()) => reply(ctx, "Left the voice channel.").await,
+        Ok(()) => {
+            local_queues().lock().await.remove(&guild_id.get());
+            reply(ctx, "Left the voice channel.").await
+        }
         Err(error) => reply(ctx, format!("I couldn't leave the voice channel: {error}")).await,
     }
 }
