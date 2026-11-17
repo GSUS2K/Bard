@@ -786,11 +786,17 @@ async fn autocomplete_audio_file(_ctx: Context<'_>, partial: &str) -> Vec<String
         }
         Some(names)
     };
-    let mut files = tokio::time::timeout(std::time::Duration::from_millis(700), scan)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let mut files = match tokio::time::timeout(std::time::Duration::from_millis(1800), scan).await {
+        Ok(Some(files)) => files,
+        Ok(None) => {
+            log::warn!("Audio file autocomplete could not read the music directory: {}", root.display());
+            return Vec::new();
+        }
+        Err(_) => {
+            log::warn!("Audio file autocomplete exceeded its 1.8 second response budget");
+            return Vec::new();
+        }
+    };
     files.sort_unstable_by_key(|name| {
         let lower = name.to_lowercase();
         (!lower.starts_with(&query), lower)
