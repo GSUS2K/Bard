@@ -14,10 +14,11 @@ The bot is based on archived Spoticord source and its code is licensed under AGP
 - `/listfiles` — list local audio files available to the voice player.
 - `/uploadfile` — save an attached audio file from Discord into the bot's music folder (up to 25 MB); optionally provide `save_as` to rename it while uploading (the original extension is added if omitted).
 - `/playfile` — choose a local audio file from autocomplete, or type its exact name, to play it in your current voice channel.
-- `/voicepanel` — open a private control panel with a file picker plus pause, resume, stop, and disconnect buttons.
+- `/voicepanel` — open a private control panel with file selection, a queue preview, playback controls, and rename/delete actions.
+- `/renamefile` — rename a library file; `/uploadfile` also accepts `save_as` to choose a name during upload.
 - `/deletefile` — uploaders can delete their own files; members with Manage Server or Administrator can delete any file.
 - `/stopvoice` and `/leavevoice` — stop local audio or disconnect the voice player.
-- `/admin status`, `/admin restart`, and `/admin update` — owner-only status, restart, and fast-forward update from your configured Git remote.
+- `/status`, `/restart`, and `/update` — top-level, owner-only status, restart, and fast-forward update commands. Restart/update DM the owner after Bard reconnects.
 
 For local voice playback, add audio files you own or are licensed to share to the folder in `MUSIC_DIR` (default: `music`). The bot must run on a computer that can access those files. `/playfile` joins your voice channel and replaces any current local audio.
 
@@ -42,7 +43,7 @@ MUSIC_DIR=music
 `GUILD_ID` is used for fast slash-command registration in debug builds. In production, commands are registered globally. Configure the same Spotify client ID and secret in the link app, and allow its `SPOTIFY_REDIRECT_URI` in the Spotify developer dashboard.
 `MUSIC_DIR` can be an absolute path, such as `C:\\Users\\you\\Music\\Discord`; use `music` to keep files in a folder beside the bot.
 
-For owner restart and updates, run the bot under a supervisor (for example, systemd) that restarts it when it exits. Set `BOT_SUPERVISED=true`, `UPDATE_REMOTE` to your Bard GitHub remote name, and `UPDATE_BRANCH` (default `main`). `/admin update` refuses to change a dirty checkout, fetches and fast-forwards that branch, builds the release binary, then exits so the supervisor starts the new binary. The only allowed admin user is Discord ID `682288992456409096`. See [`deploy/bard.service`](deploy/bard.service) for a systemd example. This source checkout workflow is for a VPS running the bot from its Git checkout; it does not update a prebuilt Docker image.
+For owner restart and updates, run the bot under a supervisor (for example, systemd) that restarts it when it exits. Set `BOT_SUPERVISED=true`, `UPDATE_REMOTE` to your Bard GitHub remote name, and `UPDATE_BRANCH` (default `main`). `/update` refuses to change a dirty checkout, fetches and fast-forwards that branch, builds the release binary, then exits so the supervisor starts the new binary. The only allowed admin user is Discord ID `682288992456409096`. See [`deploy/bard.service`](deploy/bard.service) for a systemd example. This source checkout workflow is for a VPS running the bot from its Git checkout; it does not update a prebuilt Docker image.
 
 Start PostgreSQL and the link app, then run the bot:
 
@@ -64,3 +65,4 @@ The Next.js account-linking app lives in [`link-app`](link-app/README.md). It mu
 - `playlist-read-collaborative`
 
 The link app stores the Spotify access and refresh tokens in the `account` table. Keep the database private and do not commit `.env` files or tokens.
+
