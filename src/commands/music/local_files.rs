@@ -8,7 +8,7 @@ use std::{
 use anyhow::{bail, Context as _, Result};
 use lofty::{
     config::WriteOptions,
-    file::{AudioFile, TaggedFileExt},
+    file::{AudioFile as LoftyAudioFile, TaggedFileExt},
     tag::{Accessor, Tag},
 };
 use poise::CreateReply;
