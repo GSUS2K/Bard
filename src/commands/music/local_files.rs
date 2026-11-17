@@ -357,7 +357,7 @@ pub async fn listfiles(ctx: Context<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Delete an uploaded audio file. Uploaders can delete their own files; server managers can delete any file.
+/// Delete your audio; server managers can delete any library file
 #[poise::command(slash_command, guild_only)]
 pub async fn deletefile(
     ctx: Context<'_>,
