@@ -240,12 +240,13 @@ pub async fn skiplocal(ctx: Context<'_>) -> Result<()> {
         return reply(ctx, "Nothing is playing right now.").await;
     }
     call.queue().skip()?;
-    local_queues()
-        .lock()
-        .await
-        .entry(guild_id.get())
-        .or_default()
-        .pop_front();
+    let next = {
+        let mut queues = local_queues().lock().await;
+        let queue = queues.entry(guild_id.get()).or_default();
+        queue.pop_front();
+        queue.front().cloned()
+    };
+    set_playing_activity(ctx, next.as_deref());
     reply(ctx, "Skipped the current local track.").await
 }
 
@@ -460,6 +461,7 @@ pub async fn stopvoice(ctx: Context<'_>) -> Result<()> {
     call.stop();
     call.queue().stop();
     local_queues().lock().await.remove(&guild_id.get());
+    set_playing_activity(ctx, None);
     reply(ctx, "Stopped local audio playback.").await
 }
 
@@ -474,6 +476,7 @@ pub async fn leavevoice(ctx: Context<'_>) -> Result<()> {
     match songbird.leave(guild_id).await {
         Ok(()) => {
             local_queues().lock().await.remove(&guild_id.get());
+            set_playing_activity(ctx, None);
             reply(ctx, "Left the voice channel.").await
         }
         Err(error) => reply(ctx, format!("I couldn't leave the voice channel: {error}")).await,
@@ -492,27 +495,7 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
         .filter(|name| name.chars().count() <= 100)
         .take(25)
         .collect::<Vec<_>>();
-    let queue_text = {
-        let queues = local_queues().lock().await;
-        queues
-            .get(&guild_id.get())
-            .map(|q| {
-                q.iter()
-                    .take(8)
-                    .enumerate()
-                    .map(|(i, n)| {
-                        format!(
-                            "{} `{}`",
-                            if i == 0 { "▶" } else { "•" },
-                            spoticord_utils::discord::escape(n.clone())
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "Nothing queued yet".to_owned())
-    };
+    let queue_text = queue_snapshot(guild_id).await;
     let mut selected_file: Option<String> = None;
 
     let mut components = Vec::new();
@@ -566,12 +549,16 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
         CreateButton::new("bard:edit-tags")
             .label("Edit tags")
             .style(ButtonStyle::Primary),
+        CreateButton::new("bard:refresh")
+            .label("Refresh queue")
+            .style(ButtonStyle::Secondary),
     ]));
+    let panel_components = components.clone();
 
     let panel = ctx
         .send(
             CreateReply::default()
-                .content(format!("🎼 **Bard · Music desk**\nChoose a file to play now; use `/queuefile` to add without interrupting.\n\n**Queue**\n{queue_text}\n\nSelect a library file below to rename or delete it."))
+                .content(format!("🎼 **Bard · Music desk**\nChoose a file to play now; use `/queuefile` to add without interrupting.\n\n**Queue**\n{queue_text}\n\nSelect a library file below to rename, edit tags, or delete it."))
                 .components(components)
                 .ephemeral(true),
         )
@@ -649,6 +636,20 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
             };
             let content = result.unwrap_or_else(|error| error.to_string());
             ctx.send(CreateReply::default().content(content).ephemeral(true))
+                .await?;
+            continue;
+        }
+        if interaction.data.custom_id == "bard:refresh" {
+            let queue_text = queue_snapshot(guild_id).await;
+            interaction
+                .create_response(
+                    ctx.serenity_context(),
+                    CreateInteractionResponse::UpdateMessage(
+                        CreateInteractionResponseMessage::new()
+                            .content(format!("🎼 **Bard · Music desk**\nChoose a file to play now; use `/queuefile` to add without interrupting.\n\n**Queue**\n{queue_text}\n\nSelect a library file below to rename, edit tags, or delete it."))
+                            .components(panel_components.clone()),
+                    ),
+                )
                 .await?;
             continue;
         }
@@ -941,6 +942,7 @@ async fn voice_action(
     if action == "leave" {
         manager.leave(guild_id).await?;
         local_queues().lock().await.remove(&guild_id.get());
+        set_playing_activity(ctx, None);
         return Ok("Disconnected from voice.".to_owned());
     }
 
@@ -961,6 +963,7 @@ async fn voice_action(
             call.stop();
             call.queue().stop();
             local_queues().lock().await.remove(&guild_id.get());
+            set_playing_activity(ctx, None);
             Ok("Stopped local playback.".to_owned())
         }
         "skip" => {
@@ -1032,11 +1035,66 @@ async fn enqueue_for_user(
         }
         queue.push_back(name.to_owned());
     }
-    ctx.serenity_context()
-        .set_activity(Some(serenity::all::ActivityData::listening(
-            name.chars().take(80).collect::<String>(),
-        )));
+    if replace {
+        set_playing_activity(ctx, Some(name));
+        let manager = manager.clone();
+        let serenity_context = ctx.serenity_context().clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let active = manager
+                    .get(guild_id)
+                    .map(|call| call.try_lock().map(|call| !call.queue().is_empty()).unwrap_or(true))
+                    .unwrap_or(false);
+                if active {
+                    continue;
+                }
+                let next = {
+                    let mut queues = local_queues().lock().await;
+                    queues.remove(&guild_id.get());
+                    queues.values().find_map(|queue| queue.front().cloned())
+                };
+                let text = next
+                    .map(|name| name.chars().take(80).collect::<String>())
+                    .unwrap_or_else(|| "/voicepanel · local music".to_owned());
+                serenity_context
+                    .set_activity(Some(serenity::all::ActivityData::listening(text)));
+                break;
+            }
+        });
+    }
     Ok(())
+}
+
+async fn queue_snapshot(guild_id: serenity::all::GuildId) -> String {
+    let queues = local_queues().lock().await;
+    queues
+        .get(&guild_id.get())
+        .map(|queue| {
+            queue
+                .iter()
+                .take(8)
+                .enumerate()
+                .map(|(index, name)| {
+                    format!(
+                        "{} `{}`",
+                        if index == 0 { "▶" } else { "•" },
+                        spoticord_utils::discord::escape(name.clone())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|queue| !queue.is_empty())
+        .unwrap_or_else(|| "Nothing queued yet".to_owned())
+}
+
+fn set_playing_activity(ctx: Context<'_>, name: Option<&str>) {
+    let text = name
+        .map(|name| name.chars().take(80).collect::<String>())
+        .unwrap_or_else(|| "/voicepanel · local music".to_owned());
+    ctx.serenity_context()
+        .set_activity(Some(serenity::all::ActivityData::listening(text)));
 }
 
 fn resolve_file(name: &str) -> Result<PathBuf> {
