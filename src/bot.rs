@@ -36,6 +36,7 @@ pub fn framework_opts() -> FrameworkOptions<Data, anyhow::Error> {
             commands::music::playfile(),
             commands::music::queuefile(),
             commands::music::renamefile(),
+            commands::music::editfile(),
             commands::music::skiplocal(),
             commands::music::localqueue(),
             commands::music::bard(),
