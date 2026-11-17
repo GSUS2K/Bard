@@ -1,6 +1,8 @@
 use std::{
+    collections::{HashMap, VecDeque},
     fs,
     path::{Component, Path, PathBuf},
+    sync::OnceLock,
 };
 
 use anyhow::{bail, Context as _, Result};
@@ -20,6 +22,11 @@ use crate::bot::Context;
 
 const AUDIO_EXTENSIONS: &[&str] = &["aac", "flac", "m4a", "mp3", "ogg", "wav"];
 const MAX_UPLOAD_BYTES: u32 = 25 * 1024 * 1024;
+static LOCAL_QUEUES: OnceLock<tokio::sync::Mutex<HashMap<u64, VecDeque<String>>>> = OnceLock::new();
+
+fn local_queues() -> &'static tokio::sync::Mutex<HashMap<u64, VecDeque<String>>> {
+    LOCAL_QUEUES.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+}
 
 /// Save an attached audio file to the bot's music folder
 #[poise::command(slash_command, guild_only)]
@@ -175,7 +182,40 @@ pub async fn localqueue(ctx: Context<'_>) -> Result<()> {
     };
     let call = call.lock().await;
     let count = call.queue().len();
-    reply(ctx, if count == 0 { "The local queue is empty.".to_owned() } else { format!("🎵 {count} track(s) in the local voice queue. Use `/skiplocal` to skip or `/stopvoice` to clear it.") }).await
+    let mut queues = local_queues().lock().await;
+    let names = queues.entry(guild_id.get()).or_default();
+    while names.len() > count {
+        names.pop_front();
+    }
+    let list = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            format!(
+                "{} `{}`",
+                if i == 0 { "▶" } else { "•" },
+                spoticord_utils::discord::escape(name.clone())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    reply(
+        ctx,
+        if count == 0 {
+            "The local queue is empty.".to_owned()
+        } else {
+            format!(
+                "🎵 **{} track(s)**\n{}\n\nUse `/skiplocal` or `/voicepanel` to control playback.",
+                count,
+                if list.is_empty() {
+                    "Track names are unavailable for items queued before this restart.".to_owned()
+                } else {
+                    list
+                }
+            )
+        },
+    )
+    .await
 }
 
 /// Skip the current local track and continue the queue
@@ -193,6 +233,12 @@ pub async fn skiplocal(ctx: Context<'_>) -> Result<()> {
         return reply(ctx, "Nothing is playing right now.").await;
     }
     call.queue().skip()?;
+    local_queues()
+        .lock()
+        .await
+        .entry(guild_id.get())
+        .or_default()
+        .pop_front();
     reply(ctx, "Skipped the current local track.").await
 }
 
@@ -404,6 +450,27 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
         .filter(|name| name.chars().count() <= 100)
         .take(25)
         .collect::<Vec<_>>();
+    let queue_text = {
+        let queues = local_queues().lock().await;
+        queues
+            .get(&guild_id.get())
+            .map(|q| {
+                q.iter()
+                    .take(8)
+                    .enumerate()
+                    .map(|(i, n)| {
+                        format!(
+                            "{} `{}`",
+                            if i == 0 { "▶" } else { "•" },
+                            spoticord_utils::discord::escape(n.clone())
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Nothing queued yet".to_owned())
+    };
 
     let mut components = Vec::new();
     if !files.is_empty() {
@@ -437,7 +504,7 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
     let panel = ctx
         .send(
             CreateReply::default()
-                .content("**Bard local player**\nChoose a file or use the playback controls.")
+                .content(format!("🎼 **Bard · Local player**\nChoose a file to play it now. Use `/queuefile` to add without interrupting.\n\n**Queue**\n{queue_text}\n\nManage library with `/renamefile` and `/deletefile`."))
                 .components(components)
                 .ephemeral(true),
         )
@@ -604,6 +671,7 @@ async fn voice_action(
 
     if action == "leave" {
         manager.leave(guild_id).await?;
+        local_queues().lock().await.remove(&guild_id.get());
         return Ok("Disconnected from voice.".to_owned());
     }
 
@@ -623,6 +691,7 @@ async fn voice_action(
         "stop" => {
             call.stop();
             call.queue().stop();
+            local_queues().lock().await.remove(&guild_id.get());
             Ok("Stopped local playback.".to_owned())
         }
         "skip" => {
@@ -630,6 +699,12 @@ async fn voice_action(
                 bail!("Nothing is playing right now.");
             }
             call.queue().skip()?;
+            local_queues()
+                .lock()
+                .await
+                .entry(guild_id.get())
+                .or_default()
+                .pop_front();
             Ok("Skipped the current local track.".to_owned())
         }
         _ => bail!("Unknown playback control."),
@@ -680,6 +755,14 @@ async fn enqueue_for_user(
     }
     call.enqueue_input(input).await;
     drop(call);
+    {
+        let mut queues = local_queues().lock().await;
+        let queue = queues.entry(guild_id.get()).or_default();
+        if replace {
+            queue.clear();
+        }
+        queue.push_back(name.to_owned());
+    }
     ctx.serenity_context()
         .set_activity(Some(serenity::all::ActivityData::listening(
             name.chars().take(80).collect::<String>(),
