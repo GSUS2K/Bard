@@ -497,68 +497,12 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
         .collect::<Vec<_>>();
     let queue_text = queue_snapshot(guild_id).await;
     let mut selected_file: Option<String> = None;
-
-    let mut components = Vec::new();
-    if !files.is_empty() {
-        let options = files
-            .iter()
-            .map(|name| CreateSelectMenuOption::new(name.clone(), name.clone()))
-            .collect();
-        components.push(CreateActionRow::SelectMenu(
-            CreateSelectMenu::new("bard:select-file", CreateSelectMenuKind::String { options })
-                .placeholder("▶ Play a local audio file"),
-        ));
-        let manage_options = files
-            .iter()
-            .map(|name| CreateSelectMenuOption::new(name.clone(), name.clone()))
-            .collect();
-        components.push(CreateActionRow::SelectMenu(
-            CreateSelectMenu::new(
-                "bard:manage-file",
-                CreateSelectMenuKind::String {
-                    options: manage_options,
-                },
-            )
-            .placeholder("✎ Select a file to rename or delete"),
-        ));
-    }
-    components.push(CreateActionRow::Buttons(vec![
-        CreateButton::new("bard:skip")
-            .label("Skip")
-            .style(ButtonStyle::Secondary),
-        CreateButton::new("bard:pause")
-            .label("Pause")
-            .style(ButtonStyle::Secondary),
-        CreateButton::new("bard:resume")
-            .label("Resume")
-            .style(ButtonStyle::Primary),
-        CreateButton::new("bard:stop")
-            .label("Stop")
-            .style(ButtonStyle::Danger),
-        CreateButton::new("bard:leave")
-            .label("Disconnect")
-            .style(ButtonStyle::Secondary),
-    ]));
-    components.push(CreateActionRow::Buttons(vec![
-        CreateButton::new("bard:rename-file")
-            .label("Rename selected")
-            .style(ButtonStyle::Secondary),
-        CreateButton::new("bard:delete-file")
-            .label("Delete selected")
-            .style(ButtonStyle::Danger),
-        CreateButton::new("bard:edit-tags")
-            .label("Edit tags")
-            .style(ButtonStyle::Primary),
-        CreateButton::new("bard:refresh")
-            .label("Refresh queue")
-            .style(ButtonStyle::Secondary),
-    ]));
-    let panel_components = components.clone();
+    let components = panel_components(&files);
 
     let panel = ctx
         .send(
             CreateReply::default()
-                .content(format!("🎼 **Bard · Music desk**\nChoose a file to play now; use `/queuefile` to add without interrupting.\n\n**Queue**\n{queue_text}\n\nSelect a library file below to rename, edit tags, or delete it."))
+                .embed(music_panel_embed(&queue_text, files.len()))
                 .components(components)
                 .ephemeral(true),
         )
@@ -574,7 +518,7 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
         .await
     {
         if interaction.data.custom_id == "bard:rename-file" {
-            let Some(name) = selected_file.as_deref() else {
+            let Some(name) = selected_file.clone() else {
                 interaction
                     .create_response(
                         ctx.serenity_context(),
@@ -639,15 +583,59 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
                 .await?;
             continue;
         }
+        if interaction.data.custom_id == "bard:delete-file" {
+            let Some(name) = selected_file.clone() else {
+                interaction
+                    .create_response(
+                        ctx.serenity_context(),
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content("Select a library file first.")
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await?;
+                continue;
+            };
+            let modal = CreateQuickModal::new("Confirm file deletion")
+                .short_field("Type DELETE to permanently delete this file")
+                .timeout(std::time::Duration::from_secs(90));
+            let response = interaction
+                .quick_modal(ctx.serenity_context(), modal)
+                .await?;
+            let message = match response.and_then(|r| r.inputs.first().cloned()) {
+                Some(confirmation) if confirmation.trim() == "DELETE" => {
+                    selected_file = None;
+                    match delete_library_file(ctx, &name).await {
+                        Ok(message) => message,
+                        Err(error) => error.to_string(),
+                    }
+                }
+                Some(_) => "Deletion cancelled. Type `DELETE` exactly to confirm.".to_owned(),
+                None => "Deletion cancelled.".to_owned(),
+            };
+            ctx.send(CreateReply::default().content(message).ephemeral(true))
+                .await?;
+            continue;
+        }
         if interaction.data.custom_id == "bard:refresh" {
+            let files = music_root()
+                .ok()
+                .and_then(|root| audio_files(&root).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|name| name.chars().count() <= 100)
+                .take(25)
+                .collect::<Vec<_>>();
+            selected_file = None;
             let queue_text = queue_snapshot(guild_id).await;
             interaction
                 .create_response(
                     ctx.serenity_context(),
                     CreateInteractionResponse::UpdateMessage(
                         CreateInteractionResponseMessage::new()
-                            .content(format!("🎼 **Bard · Music desk**\nChoose a file to play now; use `/queuefile` to add without interrupting.\n\n**Queue**\n{queue_text}\n\nSelect a library file below to rename, edit tags, or delete it."))
-                            .components(panel_components.clone()),
+                            .embed(music_panel_embed(&queue_text, files.len()))
+                            .components(panel_components(&files)),
                     ),
                 )
                 .await?;
@@ -685,10 +673,6 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
                     .await?;
                 continue;
             }
-            "bard:delete-file" => match selected_file.as_deref() {
-                Some(name) => delete_library_file(ctx, name).await,
-                None => Ok("Select a library file first.".to_owned()),
-            },
             "bard:select-file" => {
                 let selected = match &interaction.data.kind {
                     ComponentInteractionDataKind::StringSelect { values } => values.first(),
@@ -1087,6 +1071,100 @@ async fn queue_snapshot(guild_id: serenity::all::GuildId) -> String {
         })
         .filter(|queue| !queue.is_empty())
         .unwrap_or_else(|| "Nothing queued yet".to_owned())
+}
+
+fn music_panel_embed(queue: &str, library_count: usize) -> CreateEmbed {
+    let mut lines = queue.lines();
+    let first = lines.next().unwrap_or("Nothing queued yet");
+    let now_playing = first
+        .strip_prefix("▶ ")
+        .unwrap_or("Nothing playing");
+    let upcoming = lines.collect::<Vec<_>>().join("\n");
+    CreateEmbed::new()
+        .title("Bard · Music desk")
+        .description("Local voice playback · use the menus and buttons below to control Bard.")
+        .field("Now playing", now_playing, true)
+        .field("Library", format!("{library_count} audio file(s)"), true)
+        .field(
+            "Queue",
+            if upcoming.is_empty() {
+                if now_playing == "Nothing playing" {
+                    "Nothing queued yet"
+                } else {
+                    "No upcoming tracks"
+                }
+            } else {
+                upcoming.as_str()
+            },
+            false,
+        )
+        .field(
+            "Quick guide",
+            "Choose a file to play it now, or use `/queuefile` to add it next. Select a library file to rename, edit tags, or delete it.",
+            false,
+        )
+        .footer(CreateEmbedFooter::new(
+            "Private panel · refresh after uploads or file changes",
+        ))
+}
+
+fn panel_components(files: &[String]) -> Vec<CreateActionRow> {
+    let mut components = Vec::new();
+    if !files.is_empty() {
+        let options = files
+            .iter()
+            .map(|name| CreateSelectMenuOption::new(name.clone(), name.clone()))
+            .collect();
+        components.push(CreateActionRow::SelectMenu(
+            CreateSelectMenu::new("bard:select-file", CreateSelectMenuKind::String { options })
+                .placeholder("▶ Play a local audio file"),
+        ));
+        let manage_options = files
+            .iter()
+            .map(|name| CreateSelectMenuOption::new(name.clone(), name.clone()))
+            .collect();
+        components.push(CreateActionRow::SelectMenu(
+            CreateSelectMenu::new(
+                "bard:manage-file",
+                CreateSelectMenuKind::String {
+                    options: manage_options,
+                },
+            )
+            .placeholder("✎ Select a file to edit or delete"),
+        ));
+    }
+    components.push(CreateActionRow::Buttons(vec![
+        CreateButton::new("bard:skip")
+            .label("Skip")
+            .style(ButtonStyle::Secondary),
+        CreateButton::new("bard:pause")
+            .label("Pause")
+            .style(ButtonStyle::Secondary),
+        CreateButton::new("bard:resume")
+            .label("Resume")
+            .style(ButtonStyle::Primary),
+        CreateButton::new("bard:stop")
+            .label("Stop")
+            .style(ButtonStyle::Danger),
+        CreateButton::new("bard:leave")
+            .label("Disconnect")
+            .style(ButtonStyle::Secondary),
+    ]));
+    components.push(CreateActionRow::Buttons(vec![
+        CreateButton::new("bard:rename-file")
+            .label("Rename")
+            .style(ButtonStyle::Secondary),
+        CreateButton::new("bard:edit-tags")
+            .label("Edit tags")
+            .style(ButtonStyle::Primary),
+        CreateButton::new("bard:delete-file")
+            .label("Delete")
+            .style(ButtonStyle::Danger),
+        CreateButton::new("bard:refresh")
+            .label("Refresh")
+            .style(ButtonStyle::Secondary),
+    ]));
+    components
 }
 
 fn set_playing_activity(ctx: Context<'_>, name: Option<&str>) {
