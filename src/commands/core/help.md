@@ -15,7 +15,8 @@ Use `/link` and follow the Spotify authorization page. Spotify Premium is requir
 - `/listfiles`, `/playfile`, `/queuefile`, `/localqueue`, `/skiplocal` — manage local audio in the voice queue.
 - `/uploadfile` — attach an audio file in Discord and save it to the bot's music folder; use `save_as` to choose its name.
 - `/renamefile` and `/deletefile` — manage files you uploaded; server managers can manage any library file.
-- `/voicepanel` — open buttons and a file picker for local playback.
+- `/editfile` — change a local audio file's embedded title, artist, or album tags.
+- `/voicepanel` — open a file picker, queue preview, playback controls, and file rename/tag/delete actions.
 - `/stopvoice` and `/leavevoice` — stop local playback or disconnect Bard.
 - `/bard` — discover a tiny Bard easter egg.
 
