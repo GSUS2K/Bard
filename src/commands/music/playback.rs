@@ -1,6 +1,8 @@
 use anyhow::Result;
 use poise::CreateReply;
 use reqwest::Method;
+use serenity::all::CreateEmbed;
+use spoticord_utils::discord::Colors;
 
 use crate::bot::Context;
 
@@ -46,12 +48,22 @@ async fn action(
     endpoint: &str,
     success_message: &str,
 ) -> Result<()> {
-    let message = match super::api::request(&ctx, method, endpoint).await {
-        Ok(_) => success_message.to_owned(),
-        Err(error) => error.to_string(),
+    let (message, color) = match super::api::request(&ctx, method, endpoint).await {
+        Ok(_) => (success_message.to_owned(), Colors::Success),
+        Err(error) => (error.to_string(), Colors::Error),
     };
 
-    ctx.send(CreateReply::default().content(message).ephemeral(true))
+    ctx.send(
+        CreateReply::default()
+            .embed(
+                CreateEmbed::new()
+                    .title("Bard · Spotify controls")
+                    .description(message)
+                    .color(color),
+            )
+            .ephemeral(true),
+    )
         .await?;
     Ok(())
 }
+
