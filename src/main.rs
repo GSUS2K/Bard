@@ -9,6 +9,7 @@ use spoticord_database::Database;
 
 #[tokio::main]
 async fn main() {
+    commands::admin::initialize();
     // Force aws-lc-rs as default crypto provider
     // Since multiple dependencies either enable aws_lc_rs or ring, they cause a clash, so we have to
     // explicitly tell rustls to use the aws-lc-rs provider
@@ -65,3 +66,4 @@ async fn main() {
         error!("Bot will now shut down!");
     }
 }
+
