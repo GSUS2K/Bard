@@ -160,6 +160,14 @@ pub async fn update(ctx: Context<'_>) -> Result<()> {
         )
         .await;
     }
+    let restore_lock = run("git", &["restore", "--", "Cargo.lock"]).await?;
+    if !restore_lock.status.success() {
+        return reply(
+            ctx,
+            "The build succeeded, but I couldn't restore Cargo.lock; Bard was not restarted.",
+        )
+        .await;
+    }
     schedule_restart_notice("update").await?;
     if let Err(error) = reply(ctx, "Update built successfully. Restarting Bard now; I’ll DM you when it’s back online.").await {
         let _ = tokio::fs::remove_file(crate::bot::RESTART_NOTICE_PATH).await;
