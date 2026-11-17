@@ -14,7 +14,9 @@ type Data = Database;
 pub fn framework_opts() -> FrameworkOptions<Data, anyhow::Error> {
     poise::FrameworkOptions {
         commands: vec![
-            commands::admin::admin(),
+            commands::admin::status(),
+            commands::admin::restart(),
+            commands::admin::update(),
             #[cfg(debug_assertions)]
             commands::debug::ping(),
             commands::core::help(),
@@ -29,6 +31,11 @@ pub fn framework_opts() -> FrameworkOptions<Data, anyhow::Error> {
             commands::music::playlists(),
             commands::music::uploadfile(),
             commands::music::playfile(),
+            commands::music::queuefile(),
+            commands::music::renamefile(),
+            commands::music::skiplocal(),
+            commands::music::localqueue(),
+            commands::music::bard(),
             commands::music::listfiles(),
             commands::music::deletefile(),
             commands::music::voicepanel(),
@@ -46,6 +53,9 @@ pub async fn setup(
     database: Database,
 ) -> Result<Data> {
     info!("Successfully logged in as {}", ready.user.name);
+    ctx.set_activity(Some(serenity::all::ActivityData::listening(
+        "/voicepanel · local music",
+    )));
 
     #[cfg(debug_assertions)]
     poise::builtins::register_in_guild(
@@ -60,3 +70,4 @@ pub async fn setup(
 
     Ok(database)
 }
+
