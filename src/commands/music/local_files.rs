@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{bail, Context as _, Result};
+use lofty::{file::TaggedFileExt, tag::{Accessor, Tag}, AudioFile, WriteOptions};
 use poise::CreateReply;
 use serenity::all::{
     Attachment, ButtonStyle, ComponentInteractionCollector, ComponentInteractionDataKind,
@@ -323,6 +324,37 @@ pub async fn renamefile(
     .await
 }
 
+/// Edit embedded title, artist, and album tags on an uploaded audio file
+#[poise::command(slash_command, guild_only)]
+pub async fn editfile(
+    ctx: Context<'_>,
+    #[autocomplete = "autocomplete_audio_file"]
+    #[description = "Audio file whose tags to edit"]
+    name: String,
+    #[description = "New title (leave blank to keep current)"] title: Option<String>,
+    #[description = "New artist (leave blank to keep current)"] artist: Option<String>,
+    #[description = "New album (leave blank to keep current)"] album: Option<String>,
+) -> Result<()> {
+    if title.as_deref().unwrap_or_default().trim().is_empty()
+        && artist.as_deref().unwrap_or_default().trim().is_empty()
+        && album.as_deref().unwrap_or_default().trim().is_empty()
+    {
+        return reply(ctx, "Enter at least one new title, artist, or album value.").await;
+    }
+    let result = edit_audio_tags(
+        ctx,
+        &name,
+        title.unwrap_or_default(),
+        artist.unwrap_or_default(),
+        album.unwrap_or_default(),
+    )
+    .await;
+    match result {
+        Ok(message) => reply(ctx, message).await,
+        Err(error) => reply(ctx, format!("Couldn't edit tags: {error}")).await,
+    }
+}
+
 /// List audio files available in the configured music folder
 #[poise::command(slash_command)]
 pub async fn listfiles(ctx: Context<'_>) -> Result<()> {
@@ -527,6 +559,9 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
         CreateButton::new("bard:delete-file")
             .label("Delete selected")
             .style(ButtonStyle::Danger),
+        CreateButton::new("bard:edit-tags")
+            .label("Edit tags")
+            .style(ButtonStyle::Primary),
     ]));
 
     let panel = ctx
@@ -575,6 +610,41 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
                 None => "Rename cancelled.".to_owned(),
             };
             ctx.send(CreateReply::default().content(message).ephemeral(true))
+                .await?;
+            continue;
+        }
+        if interaction.data.custom_id == "bard:edit-tags" {
+            let Some(name) = selected_file.as_deref() else {
+                interaction
+                    .create_response(
+                        ctx.serenity_context(),
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content("Select a library file first.")
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await?;
+                continue;
+            };
+            let modal = CreateQuickModal::new("Edit song tags")
+                .short_field("Title (blank keeps current)")
+                .short_field("Artist (blank keeps current)")
+                .short_field("Album (blank keeps current)")
+                .timeout(std::time::Duration::from_secs(180));
+            let response = interaction
+                .quick_modal(ctx.serenity_context(), modal)
+                .await?;
+            let result = if let Some(inputs) = response.map(|r| r.inputs) {
+                let title = inputs.first().cloned().unwrap_or_default();
+                let artist = inputs.get(1).cloned().unwrap_or_default();
+                let album = inputs.get(2).cloned().unwrap_or_default();
+                edit_audio_tags(ctx, name, title, artist, album).await
+            } else {
+                Ok("Tag edit cancelled.".to_owned())
+            };
+            let content = result.unwrap_or_else(|error| error.to_string());
+            ctx.send(CreateReply::default().content(content).ephemeral(true))
                 .await?;
             continue;
         }
@@ -699,6 +769,47 @@ async fn rename_library_file(ctx: Context<'_>, old: &str, requested: &str) -> Re
         "Renamed `{}` to `{}`.",
         spoticord_utils::discord::escape(old.to_owned()),
         spoticord_utils::discord::escape(new_name)
+    ))
+}
+
+async fn edit_audio_tags(
+    ctx: Context<'_>,
+    name: &str,
+    title: String,
+    artist: String,
+    album: String,
+) -> Result<String> {
+    can_manage_library_file(ctx, name).await?;
+    let path = resolve_file(name)?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut tagged = lofty::read_from_path(&path)
+            .context("I couldn't read tags from this audio file")?;
+        let tag_type = tagged.primary_tag_type();
+        if !tagged.contains_tag_type(tag_type) {
+            tagged.insert_tag(Tag::new(tag_type));
+        }
+        let tag = tagged
+            .tag_mut(tag_type)
+            .context("This audio format has no writable metadata tag")?;
+        if !title.trim().is_empty() {
+            tag.set_title(title.trim().to_owned());
+        }
+        if !artist.trim().is_empty() {
+            tag.set_artist(artist.trim().to_owned());
+        }
+        if !album.trim().is_empty() {
+            tag.set_album(album.trim().to_owned());
+        }
+        tagged
+            .save_to_path(&path, WriteOptions::default())
+            .context("I couldn't write the updated audio tags")?;
+        Ok(())
+    })
+    .await
+    .context("The tag editor stopped unexpectedly")??;
+    Ok(format!(
+        "Updated embedded tags for `{}`.",
+        spoticord_utils::discord::escape(name.to_owned())
     ))
 }
 
