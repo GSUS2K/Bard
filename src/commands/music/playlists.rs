@@ -1,6 +1,8 @@
 use anyhow::Result;
 use poise::CreateReply;
 use reqwest::Method;
+use serenity::all::{CreateEmbed, CreateEmbedFooter};
+use spoticord_utils::discord::Colors;
 
 use crate::bot::Context;
 
@@ -42,11 +44,23 @@ pub async fn playlists(ctx: Context<'_>) -> Result<()> {
         }
     }
 
-    let mut message = format!("**Your Spotify playlists**\n{}", lines.join("\n"));
+    let mut description = lines.join("\n");
     if body.get("next").is_some_and(|next| !next.is_null()) {
-        message.push_str("\n\nShowing the first 20 playlists.");
+        description.push_str("\n\nShowing the first 20 playlists.");
     }
-    send(ctx, message).await
+    ctx.send(
+        CreateReply::default()
+            .embed(
+                CreateEmbed::new()
+                    .title("Your Spotify playlists")
+                    .description(description)
+                    .color(Colors::Info)
+                    .footer(CreateEmbedFooter::new("Private to you")),
+            )
+            .ephemeral(true),
+    )
+    .await?;
+    Ok(())
 }
 
 fn markdown_escape(value: &str) -> String {
@@ -57,11 +71,18 @@ fn markdown_escape(value: &str) -> String {
 }
 
 async fn send(ctx: Context<'_>, message: impl Into<String>) -> Result<()> {
+    let message = message.into();
     ctx.send(
         CreateReply::default()
-            .content(message.into())
+            .embed(
+                CreateEmbed::new()
+                    .title("Bard · Spotify playlists")
+                    .description(message)
+                    .color(Colors::Error),
+            )
             .ephemeral(true),
     )
     .await?;
     Ok(())
 }
+
