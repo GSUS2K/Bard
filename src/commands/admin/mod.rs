@@ -58,7 +58,7 @@ pub async fn status(ctx: Context<'_>) -> Result<()> {
             format!("{music_files} file(s) · {}", human_bytes(music_bytes)),
             true,
         )
-        .field("Disk", disk_text, false)
+        .field("EC2 root disk · OS, tools, apps, files", disk_text, false)
         .footer(CreateEmbedFooter::new(
             "Use /update to fetch and build the configured GitHub branch",
         ));
