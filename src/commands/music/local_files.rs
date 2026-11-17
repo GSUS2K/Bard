@@ -113,52 +113,10 @@ pub async fn playfile(
     #[description = "File name from the music folder"]
     name: String,
 ) -> Result<()> {
-    let path = match resolve_file(&name) {
-        Ok(path) => path,
-        Err(error) => return reply(ctx, error.to_string()).await,
-    };
-
     let guild_id = ctx.guild_id().expect("guild_only command has a guild");
-    let user_id = ctx.author().id;
-    let channel_id = guild_id
-        .to_guild_cached(ctx.serenity_context())
-        .and_then(|guild| {
-            guild
-                .voice_states
-                .get(&user_id)
-                .and_then(|state| state.channel_id)
-        });
-
-    let Some(channel_id) = channel_id else {
-        return reply(ctx, "Join a voice channel first, then run `/playfile`.").await;
-    };
-
-    let input = match Input::from(AudioFile::new(path))
-        .make_playable_async(get_codec_registry(), get_probe())
-        .await
-    {
-        Ok(input) => input,
-        Err(error) => {
-            return reply(ctx, format!("I couldn't read that audio file: {error}")).await;
-        }
-    };
-
-    let Some(songbird) = songbird::get(ctx.serenity_context()).await else {
-        return reply(ctx, "The voice player is unavailable right now.").await;
-    };
-
-    let call = match songbird.join(guild_id, channel_id).await {
-        Ok(call) => call,
-        Err(error) => {
-            return reply(ctx, format!("I couldn't join your voice channel: {error}")).await;
-        }
-    };
-
-    let mut call = call.lock().await;
-    call.stop();
-    call.queue().stop();
-    call.enqueue_input(input).await;
-    drop(call);
+    if let Err(error) = enqueue_for_user(ctx, guild_id, ctx.author().id, &name, true).await {
+        return reply(ctx, error.to_string()).await;
+    }
 
     ctx.send(
         CreateReply::default()
@@ -175,6 +133,146 @@ pub async fn playfile(
     )
     .await?;
     Ok(())
+}
+
+/// Add a local audio file to the end of this server's playback queue
+#[poise::command(slash_command, guild_only)]
+pub async fn queuefile(
+    ctx: Context<'_>,
+    #[autocomplete = "autocomplete_audio_file"]
+    #[description = "Audio file to add to the queue"]
+    name: String,
+) -> Result<()> {
+    let guild_id = ctx.guild_id().expect("guild_only command has a guild");
+    match enqueue_for_user(ctx, guild_id, ctx.author().id, &name, false).await {
+        Ok(()) => {
+            reply(
+                ctx,
+                format!(
+                    "Added `{}` to the voice queue.",
+                    spoticord_utils::discord::escape(name)
+                ),
+            )
+            .await
+        }
+        Err(error) => reply(ctx, error.to_string()).await,
+    }
+}
+
+/// Show how many local tracks are queued in this server
+#[poise::command(slash_command, guild_only)]
+pub async fn localqueue(ctx: Context<'_>) -> Result<()> {
+    let guild_id = ctx.guild_id().expect("guild_only command has a guild");
+    let Some(manager) = songbird::get(ctx.serenity_context()).await else {
+        return reply(ctx, "The voice player is unavailable right now.").await;
+    };
+    let Some(call) = manager.get(guild_id) else {
+        return reply(
+            ctx,
+            "Bard isn't connected to voice. The local queue is empty.",
+        )
+        .await;
+    };
+    let call = call.lock().await;
+    let count = call.queue().len();
+    reply(ctx, if count == 0 { "The local queue is empty.".to_owned() } else { format!("🎵 {count} track(s) in the local voice queue. Use `/skiplocal` to skip or `/stopvoice` to clear it.") }).await
+}
+
+/// Skip the current local track and continue the queue
+#[poise::command(slash_command, guild_only)]
+pub async fn skiplocal(ctx: Context<'_>) -> Result<()> {
+    let guild_id = ctx.guild_id().expect("guild_only command has a guild");
+    let Some(manager) = songbird::get(ctx.serenity_context()).await else {
+        return reply(ctx, "The voice player is unavailable right now.").await;
+    };
+    let Some(call) = manager.get(guild_id) else {
+        return reply(ctx, "Bard isn't connected to voice in this server.").await;
+    };
+    let call = call.lock().await;
+    if call.queue().is_empty() {
+        return reply(ctx, "Nothing is playing right now.").await;
+    }
+    call.queue().skip()?;
+    reply(ctx, "Skipped the current local track.").await
+}
+
+/// Bard's tiny hidden fortune
+#[poise::command(slash_command)]
+pub async fn bard(ctx: Context<'_>) -> Result<()> {
+    let fortunes = [
+        "The Bard whispers: the next track is the one you meant to play.",
+        "A quiet queue is just a song waiting for its cue.",
+        "Hidden verse unlocked: `BARD-PLAYBACK-42` (it does absolutely nothing).",
+        "The lyre hums: upload locally, listen together.",
+    ];
+    let index = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as usize
+        % fortunes.len();
+    reply(ctx, fortunes[index]).await
+}
+
+/// Rename a file you uploaded (server managers can rename any library file)
+#[poise::command(slash_command, guild_only)]
+pub async fn renamefile(
+    ctx: Context<'_>,
+    #[autocomplete = "autocomplete_audio_file"]
+    #[description = "File to rename"]
+    name: String,
+    #[description = "New file name; keep or add an audio extension"] new_name: String,
+) -> Result<()> {
+    let old_path = match resolve_file(&name) {
+        Ok(path) => path,
+        Err(error) => return reply(ctx, error.to_string()).await,
+    };
+    let root = music_root()?;
+    let new_name = match upload_filename(&name, Some(&new_name)) {
+        Ok(name) => name,
+        Err(error) => return reply(ctx, error.to_string()).await,
+    };
+    let new_path = root.join(&new_name);
+    if new_path.exists() {
+        return reply(ctx, "A file with that name already exists.").await;
+    }
+    let old_metadata = owner_metadata_path(&root, &name);
+    let uploader = tokio::fs::read_to_string(&old_metadata)
+        .await
+        .ok()
+        .and_then(|id| id.trim().parse::<u64>().ok());
+    let manager = ctx.author_member().await.is_some_and(|member| {
+        member
+            .permissions(ctx.serenity_context().cache.as_ref())
+            .is_ok_and(|p| {
+                p.contains(Permissions::ADMINISTRATOR) || p.contains(Permissions::MANAGE_GUILD)
+            })
+    });
+    if uploader != Some(ctx.author().id.get())
+        && !manager
+        && ctx.author().id.get() != 682_288_992_456_409_096
+    {
+        return reply(
+            ctx,
+            "You can rename files you uploaded. A server manager can rename any file.",
+        )
+        .await;
+    }
+    if let Err(error) = tokio::fs::rename(&old_path, &new_path).await {
+        return reply(ctx, format!("I couldn't rename that file: {error}")).await;
+    }
+    if let Some(id) = uploader {
+        let _ = tokio::fs::write(owner_metadata_path(&root, &new_name), id.to_string()).await;
+        let _ = tokio::fs::remove_file(old_metadata).await;
+    }
+    reply(
+        ctx,
+        format!(
+            "Renamed `{}` to `{}`.",
+            spoticord_utils::discord::escape(name),
+            spoticord_utils::discord::escape(new_name)
+        ),
+    )
+    .await
 }
 
 /// List audio files available in the configured music folder
@@ -319,6 +417,9 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
         ));
     }
     components.push(CreateActionRow::Buttons(vec![
+        CreateButton::new("bard:skip")
+            .label("Skip")
+            .style(ButtonStyle::Secondary),
         CreateButton::new("bard:pause")
             .label("Pause")
             .style(ButtonStyle::Secondary),
@@ -352,7 +453,7 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
         .await
     {
         let result = match interaction.data.custom_id.as_str() {
-            "bard:pause" | "bard:resume" | "bard:stop" | "bard:leave" => {
+            "bard:pause" | "bard:resume" | "bard:stop" | "bard:leave" | "bard:skip" => {
                 voice_action(ctx, guild_id, interaction.data.custom_id.as_str()).await
             }
             "bard:select-file" => {
@@ -452,11 +553,29 @@ fn audio_files(root: &Path) -> std::io::Result<Vec<String>> {
 async fn autocomplete_audio_file(_ctx: Context<'_>, partial: &str) -> Vec<String> {
     let query = partial.trim().to_lowercase();
     let root = PathBuf::from(spoticord_config::music_dir());
-    let mut files = audio_files(&root)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|name| name.chars().count() <= 100 && name.to_lowercase().contains(&query))
-        .collect::<Vec<_>>();
+    let scan = async {
+        let mut entries = tokio::fs::read_dir(&root).await.ok()?;
+        let mut names = Vec::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if !entry.file_type().await.is_ok_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if supported_audio(&path)
+                && name.chars().count() <= 100
+                && name.to_lowercase().contains(&query)
+            {
+                names.push(name);
+            }
+        }
+        Some(names)
+    };
+    let mut files = tokio::time::timeout(std::time::Duration::from_millis(700), scan)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     files.sort_unstable_by_key(|name| {
         let lower = name.to_lowercase();
         (!lower.starts_with(&query), lower)
@@ -506,6 +625,13 @@ async fn voice_action(
             call.queue().stop();
             Ok("Stopped local playback.".to_owned())
         }
+        "skip" => {
+            if call.queue().is_empty() {
+                bail!("Nothing is playing right now.");
+            }
+            call.queue().skip()?;
+            Ok("Skipped the current local track.".to_owned())
+        }
         _ => bail!("Unknown playback control."),
     }
 }
@@ -516,6 +642,20 @@ async fn play_for_user(
     user_id: serenity::all::UserId,
     name: &str,
 ) -> Result<String> {
+    enqueue_for_user(ctx, guild_id, user_id, name, true).await?;
+    Ok(format!(
+        "Playing `{}`.",
+        spoticord_utils::discord::escape(name)
+    ))
+}
+
+async fn enqueue_for_user(
+    ctx: Context<'_>,
+    guild_id: serenity::all::GuildId,
+    user_id: serenity::all::UserId,
+    name: &str,
+    replace: bool,
+) -> Result<()> {
     let path = resolve_file(name)?;
     let channel_id = guild_id
         .to_guild_cached(ctx.serenity_context())
@@ -534,13 +674,17 @@ async fn play_for_user(
         .context("The voice player is unavailable right now.")?;
     let call = manager.join(guild_id, channel_id).await?;
     let mut call = call.lock().await;
-    call.stop();
-    call.queue().stop();
+    if replace {
+        call.stop();
+        call.queue().stop();
+    }
     call.enqueue_input(input).await;
-    Ok(format!(
-        "Playing `{}`.",
-        spoticord_utils::discord::escape(name)
-    ))
+    drop(call);
+    ctx.serenity_context()
+        .set_activity(Some(serenity::all::ActivityData::listening(
+            name.chars().take(80).collect::<String>(),
+        )));
+    Ok(())
 }
 
 fn resolve_file(name: &str) -> Result<PathBuf> {
