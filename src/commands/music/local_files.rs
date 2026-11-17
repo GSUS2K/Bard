@@ -10,7 +10,7 @@ use poise::CreateReply;
 use serenity::all::{
     Attachment, ButtonStyle, ComponentInteractionCollector, ComponentInteractionDataKind,
     CreateActionRow, CreateButton, CreateEmbed, CreateEmbedFooter, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateSelectMenu, CreateSelectMenuKind,
+    CreateInteractionResponseMessage, CreateQuickModal, CreateSelectMenu, CreateSelectMenuKind,
     CreateSelectMenuOption, Permissions,
 };
 use sha2::{Digest, Sha256};
@@ -471,6 +471,7 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "Nothing queued yet".to_owned())
     };
+    let mut selected_file: Option<String> = None;
 
     let mut components = Vec::new();
     if !files.is_empty() {
@@ -480,7 +481,20 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
             .collect();
         components.push(CreateActionRow::SelectMenu(
             CreateSelectMenu::new("bard:select-file", CreateSelectMenuKind::String { options })
-                .placeholder("Choose a local audio file"),
+                .placeholder("▶ Play a local audio file"),
+        ));
+        let manage_options = files
+            .iter()
+            .map(|name| CreateSelectMenuOption::new(name.clone(), name.clone()))
+            .collect();
+        components.push(CreateActionRow::SelectMenu(
+            CreateSelectMenu::new(
+                "bard:manage-file",
+                CreateSelectMenuKind::String {
+                    options: manage_options,
+                },
+            )
+            .placeholder("✎ Select a file to rename or delete"),
         ));
     }
     components.push(CreateActionRow::Buttons(vec![
@@ -500,11 +514,19 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
             .label("Disconnect")
             .style(ButtonStyle::Secondary),
     ]));
+    components.push(CreateActionRow::Buttons(vec![
+        CreateButton::new("bard:rename-file")
+            .label("Rename selected")
+            .style(ButtonStyle::Secondary),
+        CreateButton::new("bard:delete-file")
+            .label("Delete selected")
+            .style(ButtonStyle::Danger),
+    ]));
 
     let panel = ctx
         .send(
             CreateReply::default()
-                .content(format!("🎼 **Bard · Local player**\nChoose a file to play it now. Use `/queuefile` to add without interrupting.\n\n**Queue**\n{queue_text}\n\nManage library with `/renamefile` and `/deletefile`."))
+                .content(format!("🎼 **Bard · Music desk**\nChoose a file to play now; use `/queuefile` to add without interrupting.\n\n**Queue**\n{queue_text}\n\nSelect a library file below to rename or delete it."))
                 .components(components)
                 .ephemeral(true),
         )
@@ -519,10 +541,73 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
         .timeout(std::time::Duration::from_secs(300))
         .await
     {
+        if interaction.data.custom_id == "bard:rename-file" {
+            let Some(name) = selected_file.as_deref() else {
+                interaction
+                    .create_response(
+                        ctx.serenity_context(),
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content("Select a library file first.")
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await?;
+                continue;
+            };
+            let modal = CreateQuickModal::new("Rename audio file")
+                .short_field("New file name (extension optional)")
+                .timeout(std::time::Duration::from_secs(180));
+            let response = interaction
+                .quick_modal(ctx.serenity_context(), modal)
+                .await?;
+            let message = match response.and_then(|r| r.inputs.first().cloned()) {
+                Some(new_name) => match rename_library_file(ctx, name, &new_name).await {
+                    Ok(message) => message,
+                    Err(error) => error.to_string(),
+                },
+                None => "Rename cancelled.".to_owned(),
+            };
+            ctx.send(CreateReply::default().content(message).ephemeral(true))
+                .await?;
+            continue;
+        }
         let result = match interaction.data.custom_id.as_str() {
             "bard:pause" | "bard:resume" | "bard:stop" | "bard:leave" | "bard:skip" => {
                 voice_action(ctx, guild_id, interaction.data.custom_id.as_str()).await
             }
+            "bard:manage-file" => {
+                selected_file = match &interaction.data.kind {
+                    ComponentInteractionDataKind::StringSelect { values } => {
+                        values.first().cloned()
+                    }
+                    _ => None,
+                };
+                let content = selected_file
+                    .as_deref()
+                    .map(|n| {
+                        format!(
+                            "Selected `{}` for library actions.",
+                            spoticord_utils::discord::escape(n.to_owned())
+                        )
+                    })
+                    .unwrap_or_else(|| "Select a library file first.".to_owned());
+                interaction
+                    .create_response(
+                        ctx.serenity_context(),
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(content)
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await?;
+                continue;
+            }
+            "bard:delete-file" => match selected_file.as_deref() {
+                Some(name) => delete_library_file(ctx, name).await,
+                None => Ok("Select a library file first.".to_owned()),
+            },
             "bard:select-file" => {
                 let selected = match &interaction.data.kind {
                     ComponentInteractionDataKind::StringSelect { values } => values.first(),
@@ -552,6 +637,63 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn can_manage_library_file(ctx: Context<'_>, name: &str) -> Result<()> {
+    let root = music_root()?;
+    let metadata = owner_metadata_path(&root, name);
+    let uploader = tokio::fs::read_to_string(metadata)
+        .await
+        .ok()
+        .and_then(|id| id.trim().parse::<u64>().ok());
+    let manager = ctx.author_member().await.is_some_and(|member| {
+        member
+            .permissions(ctx.serenity_context().cache.as_ref())
+            .is_ok_and(|p| {
+                p.contains(Permissions::ADMINISTRATOR) || p.contains(Permissions::MANAGE_GUILD)
+            })
+    });
+    if uploader != Some(ctx.author().id.get())
+        && !manager
+        && ctx.author().id.get() != 682_288_992_456_409_096
+    {
+        bail!("You can manage files you uploaded. A server manager can manage any library file.");
+    }
+    Ok(())
+}
+
+async fn delete_library_file(ctx: Context<'_>, name: &str) -> Result<String> {
+    can_manage_library_file(ctx, name).await?;
+    let path = resolve_file(name)?;
+    tokio::fs::remove_file(path).await?;
+    let root = music_root()?;
+    let _ = tokio::fs::remove_file(owner_metadata_path(&root, name)).await;
+    Ok(format!(
+        "Deleted `{}`.",
+        spoticord_utils::discord::escape(name.to_owned())
+    ))
+}
+
+async fn rename_library_file(ctx: Context<'_>, old: &str, requested: &str) -> Result<String> {
+    can_manage_library_file(ctx, old).await?;
+    let source = resolve_file(old)?;
+    let new_name = upload_filename(old, Some(requested))?;
+    let root = music_root()?;
+    let target = root.join(&new_name);
+    if target.exists() {
+        bail!("A file with that name already exists.");
+    }
+    tokio::fs::rename(source, &target).await?;
+    let old_meta = owner_metadata_path(&root, old);
+    if let Ok(uploader) = tokio::fs::read_to_string(&old_meta).await {
+        tokio::fs::write(owner_metadata_path(&root, &new_name), uploader).await?;
+        let _ = tokio::fs::remove_file(old_meta).await;
+    }
+    Ok(format!(
+        "Renamed `{}` to `{}`.",
+        spoticord_utils::discord::escape(old.to_owned()),
+        spoticord_utils::discord::escape(new_name)
+    ))
 }
 
 fn music_root() -> Result<PathBuf> {
