@@ -43,6 +43,8 @@ pub async fn uploadfile(
     if file.size > MAX_UPLOAD_BYTES {
         return reply(ctx, "That file is over the 25 MB upload limit.").await;
     }
+    // Attachment downloads can exceed Discord's three-second initial response window.
+    ctx.defer_ephemeral().await?;
 
     let root = PathBuf::from(spoticord_config::music_dir());
     if let Err(error) = tokio::fs::create_dir_all(&root).await {
