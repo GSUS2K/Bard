@@ -7,7 +7,6 @@ use tokio::process::Command;
 
 use crate::bot::Context;
 
-const OWNER_ID: u64 = 682_288_992_456_409_096;
 static STARTED_AT: OnceLock<Instant> = OnceLock::new();
 
 pub fn initialize() {
@@ -81,7 +80,11 @@ pub async fn restart(ctx: Context<'_>) -> Result<()> {
         )
         .await;
     }
-    reply(ctx, "Restarting Bard now.").await?;
+    schedule_restart_notice("restart").await?;
+    if let Err(error) = reply(ctx, "Restarting Bard now. I’ll DM you when it’s back online.").await {
+        let _ = tokio::fs::remove_file(crate::bot::RESTART_NOTICE_PATH).await;
+        return Err(error);
+    }
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     std::process::exit(0);
 }
@@ -157,13 +160,21 @@ pub async fn update(ctx: Context<'_>) -> Result<()> {
         )
         .await;
     }
-    reply(ctx, "Update built successfully. Restarting Bard.").await?;
+    schedule_restart_notice("update").await?;
+    if let Err(error) = reply(ctx, "Update built successfully. Restarting Bard now; I’ll DM you when it’s back online.").await {
+        let _ = tokio::fs::remove_file(crate::bot::RESTART_NOTICE_PATH).await;
+        return Err(error);
+    }
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     std::process::exit(0);
 }
 
 fn is_owner(ctx: &Context<'_>) -> bool {
-    ctx.author().id.get() == OWNER_ID
+    ctx.author().id.get() == crate::bot::OWNER_ID
+}
+async fn schedule_restart_notice(action: &str) -> Result<()> {
+    tokio::fs::write(crate::bot::RESTART_NOTICE_PATH, action).await?;
+    Ok(())
 }
 fn is_supervised() -> bool {
     std::env::var("BOT_SUPERVISED").is_ok_and(|v| v.eq_ignore_ascii_case("true"))
