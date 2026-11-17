@@ -391,8 +391,18 @@ pub async fn listfiles(ctx: Context<'_>) -> Result<()> {
         format!("**Audio files**\n{names}\n\nUse `/playfile` with a file name.")
     };
 
-    ctx.send(CreateReply::default().content(message).ephemeral(true))
-        .await?;
+    ctx.send(
+        CreateReply::default()
+            .embed(
+                CreateEmbed::new()
+                    .title("Bard · Audio library")
+                    .description(message)
+                    .color(Colors::Info)
+                    .footer(CreateEmbedFooter::new("Choose a file with /playfile or /queuefile")),
+            )
+            .ephemeral(true),
+    )
+    .await?;
     Ok(())
 }
 
@@ -544,8 +554,7 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
                 },
                 None => "Rename cancelled.".to_owned(),
             };
-            ctx.send(CreateReply::default().content(message).ephemeral(true))
-                .await?;
+            reply(ctx, message).await?;
             continue;
         }
         if interaction.data.custom_id == "bard:edit-tags" {
@@ -579,8 +588,7 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
                 Ok("Tag edit cancelled.".to_owned())
             };
             let content = result.unwrap_or_else(|error| error.to_string());
-            ctx.send(CreateReply::default().content(content).ephemeral(true))
-                .await?;
+            reply(ctx, content).await?;
             continue;
         }
         if interaction.data.custom_id == "bard:delete-file" {
@@ -614,8 +622,7 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
                 Some(_) => "Deletion cancelled. Type `DELETE` exactly to confirm.".to_owned(),
                 None => "Deletion cancelled.".to_owned(),
             };
-            ctx.send(CreateReply::default().content(message).ephemeral(true))
-                .await?;
+            reply(ctx, message).await?;
             continue;
         }
         if interaction.data.custom_id == "bard:refresh" {
@@ -1209,9 +1216,20 @@ fn supported_audio(path: &Path) -> bool {
 }
 
 async fn reply(ctx: Context<'_>, message: impl Into<String>) -> Result<()> {
+    let message = message.into();
+    let lower = message.to_ascii_lowercase();
+    let is_error = ["couldn't", "could not", "failed", "isn't", "aren't", "not found", "cancelled"]
+        .iter()
+        .any(|needle| lower.contains(needle));
+    let color = if is_error { Colors::Error } else { Colors::Success };
     ctx.send(
         CreateReply::default()
-            .content(message.into())
+            .embed(
+                CreateEmbed::new()
+                    .title("Bard · Music")
+                    .description(message)
+                    .color(color),
+            )
             .ephemeral(true),
     )
     .await?;
