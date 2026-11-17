@@ -6,7 +6,11 @@ use std::{
 };
 
 use anyhow::{bail, Context as _, Result};
-use lofty::{file::TaggedFileExt, tag::{Accessor, Tag}, AudioFile, WriteOptions};
+use lofty::{
+    config::WriteOptions,
+    file::{AudioFile, TaggedFileExt},
+    tag::{Accessor, Tag},
+};
 use poise::CreateReply;
 use serenity::all::{
     Attachment, ButtonStyle, ComponentInteractionCollector, ComponentInteractionDataKind,
