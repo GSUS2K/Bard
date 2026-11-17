@@ -538,7 +538,7 @@ pub async fn voicepanel(ctx: Context<'_>) -> Result<()> {
                 .quick_modal(ctx.serenity_context(), modal)
                 .await?;
             let message = match response.and_then(|r| r.inputs.first().cloned()) {
-                Some(new_name) => match rename_library_file(ctx, name, &new_name).await {
+                Some(new_name) => match rename_library_file(ctx, &name, &new_name).await {
                     Ok(message) => message,
                     Err(error) => error.to_string(),
                 },
