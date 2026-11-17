@@ -17,7 +17,12 @@ pub async fn nowplaying(ctx: Context<'_>) -> Result<()> {
     if response.status() == reqwest::StatusCode::NO_CONTENT {
         ctx.send(
             CreateReply::default()
-                .content("Spotify isn't playing anything right now.")
+                .embed(
+                    CreateEmbed::new()
+                        .title("Nothing playing")
+                        .description("Spotify isn't playing anything right now.")
+                        .color(Colors::Warning),
+                )
                 .ephemeral(true),
         )
         .await?;
@@ -28,7 +33,12 @@ pub async fn nowplaying(ctx: Context<'_>) -> Result<()> {
     let Some(item) = body.get("item").filter(|item| !item.is_null()) else {
         ctx.send(
             CreateReply::default()
-                .content("Spotify didn't return a current track.")
+                .embed(
+                    CreateEmbed::new()
+                        .title("Track unavailable")
+                        .description("Spotify didn't return a current track.")
+                        .color(Colors::Warning),
+                )
                 .ephemeral(true),
         )
         .await?;
@@ -122,7 +132,17 @@ pub async fn nowplaying(ctx: Context<'_>) -> Result<()> {
 }
 
 async fn send_error(ctx: Context<'_>, message: String) -> Result<()> {
-    ctx.send(CreateReply::default().content(message).ephemeral(true))
-        .await?;
+    ctx.send(
+        CreateReply::default()
+            .embed(
+                CreateEmbed::new()
+                    .title("Bard · Spotify")
+                    .description(message)
+                    .color(Colors::Error),
+            )
+            .ephemeral(true),
+    )
+    .await?;
     Ok(())
 }
+
